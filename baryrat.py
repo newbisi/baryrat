@@ -835,7 +835,8 @@ def chebyshev_nodes(num_nodes, interval=(-1.0, 1.0), use_mp=False):
 
 
 def brasil(f, interval, deg, tol=1e-4, maxiter=1000, max_step_size=0.1,
-        step_factor=0.1, npi=-30, init_steps=100, info=False):
+        step_factor=4.4, npi=-30, init_steps=100, info=False,
+           ctype='c-f-h', copt=1, hstep=0.2, nodes0=None):
     """Best Rational Approximation by Successive Interval Length adjustment.
 
     Computes best rational or polynomial approximations in the maximum norm by
@@ -905,8 +906,11 @@ def brasil(f, interval, deg, tol=1e-4, maxiter=1000, max_step_size=0.1,
     errors = []
     stepsize = np.nan
 
-    # start with Chebyshev nodes
-    nodes = chebyshev_nodes(nn, (a, b))
+    # start with Chebyshev nodes or pre-assigned nodes
+    if nodes0 is None:
+        nodes = chebyshev_nodes(nn, (a, b))
+    else:
+        nodes = nodes0
 
     # choose proper interpolation routine
     if n == 0:
@@ -989,20 +993,63 @@ def brasil(f, interval, deg, tol=1e-4, maxiter=1000, max_step_size=0.1,
         else:
             # PHASE 2:
             # global interval size adjustment
-            intv_lengths = np.diff(all_nodes)
+            if ctype=='c-f-h':
+                nodes = BRASILcorrection(all_nodes, local_max, a, b, max_step_size, step_factor)
+            elif ctype=='Maehly':
+                nodes = Maehlycorrection(nodes, local_max_x, local_max, copt)
+            elif ctype=='MaehlyDunham':
+                nodes = MaehlyDunhamcorrection(nodes, local_max_x, local_max, copt)
+            else:
+                nodes = Frankecorrection(nodes, local_max_x, local_max, hstep)
+    
+def BRASILcorrection(all_nodes, local_max, a, b, max_step_size, step_factor):
+    intv_lengths = np.diff(all_nodes)
 
-            mean_err = np.mean(local_max)
-            max_dev = abs(local_max - mean_err).max()
-            normalized_dev = (local_max - mean_err) / max_dev
-            stepsize = min(max_step_size, step_factor * max_dev / mean_err)
-            scaling = (1.0 - stepsize)**normalized_dev
+    mean_err = np.mean(local_max)
+    sum_err = len(local_max)*mean_err
+    max_dev = abs(local_max - mean_err).max()
+    normalized_dev = (local_max - mean_err) / max_dev
+    stepsize = min(max_step_size, step_factor * max_dev / sum_err)
+    scaling = (1.0 - stepsize)**normalized_dev
 
-            intv_lengths *= scaling
-            # rescale so that they add up to b-a again
-            intv_lengths *= (b - a) / intv_lengths.sum()
-            nodes = np.cumsum(intv_lengths)[:-1] + a
+    intv_lengths *= scaling
+    # rescale so that they add up to b-a again
+    intv_lengths *= (b - a) / intv_lengths.sum()
+    nodes = np.cumsum(intv_lengths)[:-1] + a
+    return nodes
 
+def Maehlycorrection(nodes, local_max_x, local_max, copt):
+    if copt==1:
+        b = np.log(local_max[1:]/local_max[0])
+    else:
+        b = 2*(local_max[1:]-local_max[0])/(local_max[1:]+local_max[0])
+    M = (local_max_x[0]-local_max_x[1:,None])/((local_max_x[1:,None]-nodes)*(local_max_x[0]-nodes))
+    dz = np.linalg.solve(M, b)
+    return nodes+dz
 
+def MaehlyDunhamcorrection(nodes, local_max_x, local_max, copt):
+    epsgeom = np.exp(np.mean(np.log(local_max)))
+    if copt==2:
+        b = np.log(local_max/epsgeom)
+    else:
+        b = 2*(local_max - epsgeom)/(local_max + epsgeom)
+        
+    Ex = nodes[:,None]-local_max_x
+    Xpx = nodes[:,None]-nodes+np.eye(len(nodes))
+    dzp1 = np.prod(Ex[:,:-1]/Xpx, 1)*Ex[:,-1]
+
+    Xe = local_max_x[:,None]-nodes
+    Epe = local_max_x[:,None]-local_max_x+np.eye(len(local_max_x))
+    Ms = 1/(nodes[:,None]-local_max_x)*(b*np.prod(Xe/Epe[:,:-1],1)/Epe[:,-1])
+    dzp2 = np.sum(Ms,1)
+    dz = dzp1*dzp2
+    return nodes+dz
+    
+def Frankecorrection(nodes, local_max_x, local_max, hstep):
+    dz = np.diff(local_max)*np.diff(local_max_x)/(np.sum(local_max)/len(local_max))
+    return nodes + hstep*dz 
+
+    
 ################################################################################
 # Newton approximation algorithms
 ################################################################################
